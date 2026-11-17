@@ -216,7 +216,7 @@ jobs:
       - name: Download Toolchains & Kernel Source
         run: |
           mkdir -p kernel_workspace && cd kernel_workspace
-          MIDORI_MIRROR="https://github.com/${{ github.repository }}/releases/download/${{ steps.cfg.outputs.mirror_tag }}"
+          MIDORI_MIRROR="https://github.com/midori01/gki_ksu_workflow/releases/download/${{ steps.cfg.outputs.mirror_tag }}"
           CLANG_TAR="clang-${{ steps.cfg.outputs.clang_version }}.tar.gz"
           case "${{ steps.cfg.outputs.asb_date }}" in
             lts)
@@ -354,6 +354,7 @@ jobs:
               ;;
             MidoriSU-NX)
               patch -p1 -d KernelSU < <(curl -sSfL "https://github.com/midori01/KernelSU/commit/next.patch")
+              patch -p1 -d KernelSU < "${{ github.workspace }}/.github/patches/custom_nx.patch"
               ;;
             MidoriSU-OX)
               patch -p1 -d KernelSU < <(curl -sSfL "https://github.com/midori01/KernelSU/commit/official.patch")
