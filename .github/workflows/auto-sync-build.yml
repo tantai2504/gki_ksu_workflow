@@ -1,0 +1,135 @@
+name: Auto Sync & Build 6.6 NX
+
+on:
+  schedule:
+    # Check every 6 hours (00:00, 06:00, 12:00, 18:00 UTC = 07:00, 13:00, 19:00, 01:00 GMT+7)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if latest upstream 6.6 release was already built'
+        required: false
+        default: false
+        type: boolean
+      use_droidspaces:
+        description: 'Droidspaces & NTSync'
+        required: false
+        default: true
+        type: boolean
+      build_adios_module:
+        description: 'Build ADIOS Module'
+        required: false
+        default: false
+        type: boolean
+      build_tcp_congestion_module:
+        description: 'Build TCP Congestion Control Module'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: auto-sync-build-6.6
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync-and-trigger:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM_REPO: midori01/gki_ksu_workflow
+      STATE_FILE: .github/config/last_upstream_6.6_tag
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+
+      - name: Check Latest Upstream 6.6 Release
+        id: check
+        run: |
+          LATEST_TAG=$(gh api "repos/${UPSTREAM_REPO}/releases?per_page=30" --jq '[.[] | select(.tag_name | endswith("-6.6"))][0].tag_name // ""')
+          LAST_TAG=""
+          [ -f "$STATE_FILE" ] && LAST_TAG=$(tr -d ' \r\n' < "$STATE_FILE")
+          echo "Upstream latest 6.6 tag : ${LATEST_TAG:-<none>}"
+          echo "Local last built tag    : ${LAST_TAG:-<none>}"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+          FORCE="${{ inputs.force_build }}"
+          if [ "$FORCE" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=force_build" >> "$GITHUB_OUTPUT"
+          elif [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$LAST_TAG" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "reason=new_upstream_release" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "reason=up_to_date" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync Upstream Config, Patches, Modules & Scripts
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          git fetch --depth=1 "https://github.com/${UPSTREAM_REPO}.git" main
+          cp .github/patches/custom_nx.patch /tmp/custom_nx.patch
+
+          for dir in .github/actions .github/config .github/modules .github/patches .github/scripts; do
+            rm -rf "$dir"
+            git checkout FETCH_HEAD -- "$dir" 2>/dev/null || true
+          done
+
+          cp /tmp/custom_nx.patch .github/patches/custom_nx.patch
+
+          if ! git diff --quiet HEAD FETCH_HEAD -- .github/workflows/build-kernel.yml .github/workflows/build.yml 2>/dev/null; then
+            echo "::notice::Upstream updated .github/workflows/build*.yml. Non-workflow files were synced automatically; rebase workflows manually only if a build breaks."
+          fi
+
+          if [ -n "${{ steps.check.outputs.latest_tag }}" ]; then
+            printf '%s\n' "${{ steps.check.outputs.latest_tag }}" > "$STATE_FILE"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/actions .github/config .github/modules .github/patches .github/scripts
+          if ! git diff --staged --quiet; then
+            git commit -m "auto: sync upstream 6.6 (${{ steps.check.outputs.latest_tag || 'manual' }})"
+            git push origin "HEAD:${{ github.ref_name }}"
+          else
+            echo "No file changes to commit."
+          fi
+
+      - name: Trigger Build and Release (Kernel 6.6 - MidoriSU-NX)
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          USE_DS="${{ inputs.use_droidspaces }}"
+          [ -z "$USE_DS" ] && USE_DS="true"
+          BUILD_ADIOS_MOD="${{ inputs.build_adios_module }}"
+          [ -z "$BUILD_ADIOS_MOD" ] && BUILD_ADIOS_MOD="false"
+          BUILD_TCP_MOD="${{ inputs.build_tcp_congestion_module }}"
+          [ -z "$BUILD_TCP_MOD" ] && BUILD_TCP_MOD="false"
+
+          echo "Dispatching build.yml for Kernel 6.6 / MidoriSU-NX (droidspaces=$USE_DS, adios_mod=$BUILD_ADIOS_MOD, tcp_mod=$BUILD_TCP_MOD)..."
+          gh workflow run build.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            -f source_mirror=midori \
+            -f kernel_version=6.6 \
+            -f ksu_variant=MidoriSU-NX \
+            -f use_ccache=true \
+            -f use_adios=true \
+            -f build_adios_module="$BUILD_ADIOS_MOD" \
+            -f build_tcp_congestion_module="$BUILD_TCP_MOD" \
+            -f use_droidspaces="$USE_DS" \
+            -f use_rekernel=true \
+            -f use_vpnhide=true \
+            -f use_nomount=true \
+            -f use_fgetpriority=true \
+            -f use_extra_features=true \
+            -f enable_susfs=true \
+            -f sync_upstream=false \
+            -f release_type=release

@@ -1,0 +1,86 @@
+diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
+index 1e4ee63d..4ea53977 100644
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -41,6 +41,28 @@ static bool ksu_selinux_hide_enabled __read_mostly = false;
+ static bool ksu_selinux_hide_running __read_mostly = false;
+ static bool ksu_selinux_hide_keep_backup __read_mostly = false;
+ 
++// Userdebug precompiled_sepolicy leaves these types visible in backup_sepolicy.
++// Treat them as unknown when queried from app uids, matching the ksu/ksu_file path.
++static const char * const ksu_hidden_type_markers[] = {
++    ":adbroot:",
++    ":su:",
++    NULL,
++};
++
++static bool ksu_should_hide_context(const char *buf, size_t size)
++{
++    const char * const *p;
++
++    if (!buf || !size)
++        return false;
++
++    for (p = ksu_hidden_type_markers; *p; p++) {
++        if (strnstr(buf, *p, size))
++            return true;
++    }
++    return false;
++}
++
+ enum sel_inos {
+     SEL_ROOT_INO = 2,
+     SEL_LOAD, /* load policy */
+@@ -115,6 +137,11 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
+         ksu_avc_has_perm_compat(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
+     if (length)
+         goto out;
++
++    length = -EINVAL;
++    if (ksu_should_hide_context(buf, size))
++        goto out;
++
+     length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
+     if (length) {
+         goto out;
+@@ -172,6 +199,10 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
+     sconlen = strlen(scon);
+     tconlen = strlen(tcon);
+ 
++    length = -EINVAL;
++    if (ksu_should_hide_context(scon, sconlen) || ksu_should_hide_context(tcon, tconlen))
++        goto out;
++
+     length =
+         security_context_to_sid_with_policy(backup_sepolicy, scon, sconlen, &ssid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
+     if (length) {
+@@ -264,6 +295,8 @@ static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
+             str[size - 1] = 0;
+             size--;
+         }
++        if (ksu_should_hide_context(value, size))
++            return -EINVAL;
+         error = security_context_to_sid_live(value, size, &sid);
+         if (error == -EAGAIN) {
+             // stale type mark, use the dual parse
+@@ -379,11 +412,15 @@ static int __nocfi my_inode_setxattr(struct dentry *dentry, const char *name, co
+         return rc;
+ 
+     // Keep context parsing after native relabelfrom check
+-    rc = security_context_to_sid_live(value, size, &newsid);
+-    if (rc == -EAGAIN) {
+-        backup_rc = security_context_to_sid_with_policy(backup_sepolicy, value, size, &backup_sid, SECSID_NULL,
+-                                                        GFP_KERNEL, &newsid, &rc);
+-        rc = backup_rc ?: rc;
++    if (ksu_should_hide_context(value, size)) {
++        rc = -EINVAL;
++    } else {
++        rc = security_context_to_sid_live(value, size, &newsid);
++        if (rc == -EAGAIN) {
++            backup_rc = security_context_to_sid_with_policy(backup_sepolicy, value, size, &backup_sid, SECSID_NULL,
++                                                            GFP_KERNEL, &newsid, &rc);
++            rc = backup_rc ?: rc;
++        }
+     }
+ 
+     if (rc == -EINVAL) {
